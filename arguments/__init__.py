@@ -39,12 +39,13 @@ class ModelParams(ParamGroup):
         self.sem_dim = 10
         self.ape_dim = 256
         self.clip_dim = 512
-        self.tab_len = 300
+        self.tab_len = 500
         self._source_path = ""
         self._model_path = ""
         self._images = "images"
         self._resolution = -1
         self._white_background = False
+        self.feature_level = 1
         self.data_device = "cuda"
         self.eval = False
         super().__init__(parser, "Loading Parameters", sentinel)

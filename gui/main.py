@@ -38,6 +38,8 @@ from ext import EVA02CLIP, VisionLanguageAlign
 from networks import LinearSVM, ConvergenceTracker
 import cv2
 
+from xvfbwrapper import Xvfb
+
 SEM_DIM = 10
 
 
@@ -2032,7 +2034,7 @@ if __name__ == "__main__":
 
     # override default config from cli
     opt = OmegaConf.merge(OmegaConf.load(args.config),
-                          OmegaConf.from_cli(extras))
+                        OmegaConf.from_cli(extras))
 
     gui = GUI(opt)
 

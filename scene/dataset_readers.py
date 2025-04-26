@@ -95,15 +95,17 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, load_sem=Tr
         image_name = os.path.basename(image_path).split(".")[0]
         image = Image.open(image_path)
 
-        ape_path = os.path.join(images_folder, f'../clip_feat/{image_name}.pt')
-        clip_path = os.path.join(images_folder, f'../clip_avg/{image_name}.pt')
-        ape_feat = torch.load(ape_path).cpu() if load_sem else None
-        clip_feat = None  # torch.load(clip_path).cpu()
-        semantic = {'ape': ape_feat, 'clip': clip_feat}
-
+        # ape_path = os.path.join(images_folder, f'../clip_feat/{image_name}.pt')
+        # clip_path = os.path.join(images_folder, f'../clip_avg/{image_name}.pt')
+        # ape_feat = torch.load(ape_path).cpu() if load_sem else None
+        # clip_feat = None  # torch.load(clip_path).cpu()
+        # semantic = {'ape': ape_feat, 'clip': clip_feat}
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
-                              image_path=image_path, image_name=image_name, width=width, height=height,
-                              semantic=semantic, semantic_path=ape_path)
+                              image_path=image_path, image_name=image_name, width=width, height=height)
+
+        # cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
+        #                       image_path=image_path, image_name=image_name, width=width, height=height,
+        #                       semantic=semantic, semantic_path=ape_path)
         cam_infos.append(cam_info)
     sys.stdout.write('\n')
     return cam_infos
@@ -150,8 +152,13 @@ def readColmapSceneInfo(path, images, eval, llffhold=8, load_sem=True):
     cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
 
     if eval:
-        train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
-        test_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold == 0]
+        if os.path.basename(path) == "teatime":
+            test_frames = ['frame_00002', 'frame_00025', 'frame_00043', 'frame_00107', 'frame_00129', 'frame_00140']
+            train_cam_infos = [c for c in cam_infos if c.image_name not in test_frames]
+            test_cam_infos = [c for c in cam_infos if c.image_name in test_frames]
+        else:
+            train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
+            test_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold == 0]
     else:
         train_cam_infos = cam_infos
         test_cam_infos = []
@@ -179,7 +186,6 @@ def readColmapSceneInfo(path, images, eval, llffhold=8, load_sem=True):
                            nerf_normalization=nerf_normalization,
                            ply_path=ply_path)
     return scene_info
-
 
 
 # limited use case, only for synthetic data
@@ -380,8 +386,114 @@ def readScanNetSceneInfo(path, eval, llffhold=8, simple_pcd=True):
                            ply_path=ply_path)
     return scene_info
 
+def readCamerasFromTransforms_nerfstudio(path, transformsfile, depths_folder, white_background, is_test, extension=".png"):
+    cam_infos = []
+
+    with open(transformsfile) as json_file:
+        contents = json.load(json_file)
+        focal_len_x = contents["fl_x"]
+        focal_len_y = contents["fl_y"]
+        cx = contents["cx"] * 2 
+        cy = contents["cy"] * 2 
+        fovx = focal2fov(focal_len_x, cx)
+        fovy = focal2fov(focal_len_y, cy)
+
+        FovY = fovy 
+        FovX = fovx
+        frames = contents["frames"]
+        # raise ValueError("Frames: ", frames)
+        for idx, frame in enumerate(frames):
+            image_path = path.replace("nerfstudio", "undistorted_images")
+            cam_name = frame["file_path"]
+
+            # NeRF 'transform_matrix' is a camera-to-world transform
+            c2w = np.array(frame["transform_matrix"])
+            # change from OpenGL/Blender camera axes (Y up, Z back) to COLMAP (Y down, Z forward)
+            applied_transform = np.array([
+                [0,  1,  0,  0],
+                [1,  0,  0,  0],
+                [0,  0, -1,  0],
+                [0,  0,  0,  1],
+            ], dtype=float)
+            c2w = np.dot(applied_transform, c2w)
+            # get the world-to-camera transform and set R, T
+            # w2c = c2w
+            w2c = np.linalg.inv(c2w)
+            w2c[1:3] *= -1
+            R = np.transpose(w2c[:3,:3])  # R is stored transposed due to 'glm' in CUDA code
+            T = w2c[:3, 3]
+            image_path = os.path.join(image_path, cam_name)
+            image_name = Path(cam_name).stem
+    
+
+            image = Image.open(image_path)
+            # resize
+            resize = [584, 876]
+            resize_img = (
+                (resize[1], resize[0])
+                if resize[1] > resize[0]
+                else (resize[0], resize[1])
+            )
+            # image = image.resize(resize_img, Image.Resampling.LANCZOS)
+            image = image.resize(resize_img, Image.LANCZOS)
+            
+            # depth_path = os.path.join(depths_folder, f"{image_name}.png") if depths_folder != "" else ""
+            # , depth_path=depth_path
+            # cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX,
+            #                 image_path=image_path, image_name=image_name,
+            #                 width=cx, height=cy, depth_path=depth_path, depth_params=None, is_test=is_test))
+            cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX,
+                            image=image, image_path=image_path, image_name=image_name,
+                            width=cx, height=cy))
+            
+    return cam_infos
+
+def readScanNetppInfo(path, white_background, depths, eval, lang_path, llff_hold=8, extension=".JPG", ):
+
+    depths_folder=os.path.join(path, depths) if depths != "" else ""
+    print("Reading Training Transforms")
+    all_cam_infos = readCamerasFromTransforms_nerfstudio(path, lang_path, depths_folder, white_background, False, extension)
+    # print("Reading Test Transforms")
+    # test_cam_infos = readCamerasFromTransforms_nerfstudio(path, lang_path, depths_folder, white_background, True, extension)
+    
+    if not eval:
+        train_cam_infos = all_cam_infos
+        test_cam_infos = []
+    else:
+        train_cam_infos = [c for idx, c in enumerate(all_cam_infos) if idx % llff_hold != 0]
+        test_cam_infos = [c for idx, c in enumerate(all_cam_infos) if idx % llff_hold == 0]
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    ply_path = os.path.join(path, "points3d.ply")
+    if not os.path.exists(ply_path):
+        # Since this data set has no colmap data, we start with random points
+        num_pts = 100_000
+        print(f"Generating random point cloud ({num_pts})...")
+        
+        # We create random points inside the bounds of the synthetic Blender scenes
+        xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
+        shs = np.random.random((num_pts, 3)) / 255.0
+        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
+
+        storePly(ply_path, xyz, SH2RGB(shs) * 255)
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        pcd = None
+
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path,
+                        #    is_nerf_synthetic=False
+                           )
+    return scene_info
+
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
     "Blender": readNerfSyntheticInfo,
-    "ScanNet": readScanNetSceneInfo
+    "ScanNet": readScanNetSceneInfo,
+    "ScanNetpp": readScanNetppInfo
 }

@@ -57,13 +57,17 @@ def kmeans(x, ncluster, niter=10):
 
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+    
+    language_feature_dir=f"{dataset.source_path}/dslr/language_features"
+    # language_feature_dir=f"{dataset.source_path}/language_features"
+    
     # torch.autograd.set_detect_anomaly = True
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, dataset.sem_dim)
     semantic_MLP = SemanticModel(dim_in=dataset.sem_dim, dim_out=dataset.tab_len, num_layer=1, use_bias=True)
     sem_opt = torch.optim.Adam(semantic_MLP.parameters(), lr=0.003)
-    lut = torch.nn.Parameter(torch.rand((dataset.tab_len, dataset.ape_dim), device="cuda", requires_grad=True) * 0.03)
+    lut = torch.nn.Parameter(torch.rand((dataset.tab_len, dataset.ape_dim), device="cuda", requires_grad=True) * 0.03) #look up table
     lut_opt = torch.optim.Adam([lut], lr=0.001)
 
     scene = Scene(dataset, gaussians, 1)
@@ -77,9 +81,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     # count kmeans time
     iter_start.record()
+    # tot = torch.cat(
+    #     [kmeans(x.semantic['ape'].permute(1, 2, 0).reshape(-1, dataset.ape_dim).unique(dim=0).cuda(), 80) for x in
+    #      scene.getTrainCameras()[::8]], 0)
     tot = torch.cat(
-        [kmeans(x.semantic['ape'].permute(1, 2, 0).reshape(-1, dataset.ape_dim).unique(dim=0).cuda(), 80) for x in
+        [x.get_unique_language_features(language_feature_dir, dataset.feature_level) for x in
          scene.getTrainCameras()[::8]], 0)
+    print(f"tot shape: {tot.shape}")
     tot_k = kmeans(tot, dataset.tab_len)
     lut.data = tot_k.float().clone().detach().requires_grad_(True)
     del tot
@@ -142,18 +150,40 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         sem_feature = sem_feature.permute(1, 2, 0).reshape(-1, dataset.sem_dim)
         sem_label = semantic_MLP(sem_feature)
         sem_label = softmax(sem_label, dim=-1)  ###
-        gtl = viewpoint_cam.semantic['ape'].to("cuda").float()
+        # gtl = viewpoint_cam.semantic['ape'].to("cuda").float()
+        gtl, mask = viewpoint_cam.get_language_feature(language_feature_dir, dataset.feature_level)
 
-        gtl = gtl.permute(1, 2, 0).reshape(-1, dataset.ape_dim)
-        gtl /= gtl.norm(dim=1, keepdim=True)
+        # gtl = gtl.permute(1, 2, 0).reshape(-1, dataset.ape_dim)
+        gtl = gtl.permute(1, 2, 0).reshape(-1, dataset.clip_dim)
+        mask_flat = mask.reshape(-1) if mask is not None else torch.ones(gtl.shape[0], device=gtl.device)
+        
+        # Only process features where mask is True
+        valid_indices = mask_flat.bool()
+        gtl_valid = gtl[valid_indices]
+        
+        # gtl /= gtl.norm(dim=1, keepdim=True)
+        # lut1 = lut / lut.norm(dim=1, keepdim=True)
+        # sim = gtl @ lut1.T
+        
+        # Normalize features
+        gtl_valid /= gtl_valid.norm(dim=1, keepdim=True)
         lut1 = lut / lut.norm(dim=1, keepdim=True)
-        sim = gtl @ lut1.T
+        sim = gtl_valid @ lut1.T
 
         sim_val = sim.max(dim=1, keepdim=True)[0]
         label = (sim == sim_val).float().detach()
-        lab = torch.nn.MSELoss()(sem_label, label) * 50
+        
+        # Make sure sem_label is also filtered with the same mask
+        sem_label_valid = sem_label[valid_indices]
+        
+        # lab = torch.nn.MSELoss()(sem_label, label) * 50
+        # sl = (1 - sim_val.mean())
+        # recc = 1 - cosine_similarity(lut[sem_label.argmax(-1)], gtl, dim=-1).mean()
+        # Now both tensors have the same shape
+        lab = torch.nn.MSELoss()(sem_label_valid, label) * 50
         sl = (1 - sim_val.mean())
-        recc = 1 - cosine_similarity(lut[sem_label.argmax(-1)], gtl, dim=-1).mean()
+        recc = 1 - cosine_similarity(lut[sem_label_valid.argmax(-1)], gtl_valid, dim=-1).mean()
+
         t = 1 if iteration < 1000 else 2
         anneal = sim * t
         b = softmax(anneal, dim=1) * log_softmax(anneal, dim=1)
@@ -183,10 +213,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                             testing_iterations, scene, render, (pipe, background))
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
-                scene.save(iteration)
+                scene.save(iteration, dataset.feature_level)
                 semantic_MLP.save(
-                    os.path.join(scene.model_path, f'point_cloud/iteration_{iteration}', "semantic_MLP.pt"))
-                torch.save(lut, os.path.join(scene.model_path, f'point_cloud/iteration_{iteration}', "LUT.pt"))
+                    os.path.join(scene.model_path, f'point_cloud/iteration_{iteration}_lvl_{dataset.feature_level}', "semantic_MLP.pt"))
+                torch.save(lut, os.path.join(scene.model_path, f'point_cloud/iteration_{iteration}_lvl_{dataset.feature_level}', "LUT.pt"))
 
             # Optimizer step
             if iteration < opt.iterations:
@@ -278,8 +308,8 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=12652)
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[1000, 1500])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[1000, 1500])
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[1500])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[1500])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default=None)

@@ -1,19 +1,38 @@
-
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
 import torch.optim as optim
-from utils.image_utils import apply_mask, compute_mask_ratio, calculate_iou
+import sys, os
+# print("PYTHONPATH:", sys.path)
+
+# from utils.image_utils import apply_mask, compute_mask_ratio, calculate_iou
 from collections import deque
+
+def calculate_iou(label, pred):
+
+    pred_inds = pred == 1
+    label_inds = label == 1
+    intersection = torch.logical_and(pred_inds, label_inds).sum()
+    union = torch.logical_or(pred_inds, label_inds).sum()
+    if union == 0:
+        iou = float('nan')  # 避免除以零
+    else:
+        iou = float(intersection) / float(max(union, 1))
+
+    return iou
 
 
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
+
 class LinearSVM(nn.Module):
     def __init__(self, set_bias=0.86, input_dim=256, lr=0.01):
         super(LinearSVM, self).__init__()
         # 只有一个线性层
         self.linear = nn.Linear(input_dim, 1)  # self.clip_feature shape为256
+        self.set_bias = set_bias
+        self.input_dim = input_dim
+        self.lr=lr
         
         nn.init.constant_(self.linear.bias, 2-inverse_sigmoid(torch.tensor(set_bias)))
         
@@ -36,27 +55,66 @@ class LinearSVM(nn.Module):
         y = y.squeeze()
         output = self.forward(x).squeeze()
         
-        # # 正样本权重为10
+        # svm loss
+        # loss = hinge_loss(output, y)
         weights = torch.tensor([50]).to(x.device)
         loss = torch.nn.BCEWithLogitsLoss(pos_weight=weights)(output, y)
-        # loss = torch.nn.BCEWithLogitsLoss(neg_weight=weights)(output, y)
-        
-        # svm loss
-        loss = hinge_loss(output, y)
 
-        iou = calculate_iou(y>0, output>0)
+        # Calculate IoU before backward
+        with torch.no_grad():
+            iou = calculate_iou((y > 0).detach(), (output > 0).detach())
 
         loss.backward()
         self.optimizer.step()
         
-        with torch.no_grad():
-            output = self.forward(x).squeeze()
-            iou = calculate_iou(y>0, output>0)
-
-        return loss, iou
+        return loss.detach(), iou
     
     def forward(self, x):
         return self.linear(x/0.3438)
+        # return self.linear(x)
+    
+    # Saving method
+    def save(self, path):
+        """
+        Save the entire model state
+        
+        Args:
+            path (str): File path to save the model
+        """
+        torch.save({
+            'model_state_dict': self.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'set_bias': self.set_bias,
+            'input_dim': self.input_dim,
+            'lr': self.lr
+        }, path)
+        
+     # Class method to load the model
+    @classmethod
+    def load(cls, path):
+        """
+        Load a saved LinearSVM model
+        
+        Args:
+            path (str): File path to load the model from
+        
+        Returns:
+            LinearSVM: Loaded model instance
+        """
+        checkpoint = torch.load(path)
+        
+        # Recreate the model with original parameters
+        model = cls(
+            set_bias=checkpoint['set_bias'],
+            input_dim=checkpoint['input_dim'],
+            lr=checkpoint['lr']
+        )
+        
+        # Load the state dictionaries
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        
+        return model
 
 # 定义hinge损失函数
 def hinge_loss(outputs, labels):

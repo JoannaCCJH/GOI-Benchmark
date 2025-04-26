@@ -12,7 +12,7 @@ class Scene:
 
     gaussians : GaussianModel
 
-    def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True, resolution_scales=[1.0]):
+    def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True, resolution_scales=[1.0], is_render_sem=False):
         """b
         :param path: Path to colmap scene main folder.
         """
@@ -35,6 +35,9 @@ class Scene:
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             print("Found transforms_train.json file, assuming Blender data set!")
             scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval)
+        elif os.path.exists(os.path.join(args.source_path, "dslr/nerfstudio")):
+            print("there is Scannetpp data")
+            scene_info = sceneLoadTypeCallbacks["ScanNetpp"](os.path.join(args.source_path, "dslr/nerfstudio"), args.white_background, os.path.join(args.source_path, "dslr/undistorted_depths"), args.eval, os.path.join(args.source_path, "dslr/nerfstudio/", "lang_feat_selected_imgs.json"))
         else:
             scene_info = sceneLoadTypeCallbacks["ScanNet"](args.source_path, args.eval)
 
@@ -65,15 +68,21 @@ class Scene:
             self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)
 
         if self.loaded_iter:
-            self.gaussians.load_ply(os.path.join(self.model_path,
+            if is_render_sem:
+                self.gaussians.load_ply(os.path.join(self.model_path,
                                                            "point_cloud",
-                                                           "iteration_" + str(self.loaded_iter),
+                                                           "iteration_" + str(self.loaded_iter) + "_lvl_" + str(args.feature_level),
                                                            "point_cloud.ply"))
+            else:
+                self.gaussians.load_ply(os.path.join(self.model_path,
+                                                            "point_cloud",
+                                                            "iteration_" + str(self.loaded_iter),
+                                                            "point_cloud.ply"))
         else:
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
 
-    def save(self, iteration):
-        point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
+    def save(self, iteration, feature_level):
+        point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}_lvl_{}".format(iteration, feature_level))
         self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
 
     def getTrainCameras(self, scale=1.0):

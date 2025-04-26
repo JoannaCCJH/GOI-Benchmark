@@ -1,20 +1,20 @@
-load: output/360_room/point_cloud/iteration_1500  # path to the model to load
-source_path: datasets/360/room  # path to the dataset
+load: /home/joanna_cheng/workspace/gaussian-splatting-gsplats/output/teatime/point_cloud/iteration_1500  # path to the model to load
+source_path: /scratch/joanna_cheng/lerf_ovs/teatime  # path to the dataset
 
-images: images_8/  # change this to images_2/4/8 (if existing) for faster loading
-target_prompt: "sofa in dark green"  # default text prompt for the segmentation
-target_res_prompt: "sofa in dark green"  # prompt for res, same as target_prompt
+images: images/  # change this to images_2/4/8 (if existing) for faster loading
+target_prompt: "cookies in the plate"  # default text prompt for the segmentation
+target_res_prompt: "cookies in the plate"  # prompt for res, same as target_prompt
 
-vlm: ape  # [ape, clip]
+vlm: clip  # [ape, clip]
 radius: 2
 outdir: output/exp
-save_path: m360  # saving in <outdir>/<save_path>
+save_path: lerf  # saving in <outdir>/<save_path>
 
 ### rendering options
 gui: True
 white_background: False
-H: 520
-W: 780
+H: 730
+W: 988
 fovy: 60
 sh_degree: 3
 

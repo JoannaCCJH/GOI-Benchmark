@@ -38,7 +38,7 @@ class ModelParams(ParamGroup):
         self.sh_degree = 3
         self.sem_dim = 10
         self.ape_dim = 256
-        self.clip_dim = 512
+        self.clip_dim = 512 # 512
         self.tab_len = 500
         self._source_path = ""
         self._model_path = ""

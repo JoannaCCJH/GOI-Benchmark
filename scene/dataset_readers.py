@@ -448,13 +448,11 @@ def readCamerasFromTransforms_nerfstudio(path, transformsfile, depths_folder, wh
             
     return cam_infos
 
-def readScanNetppInfo(path, white_background, depths, eval, lang_path, llff_hold=8, extension=".JPG", ):
+def readScanNetppInfo(path, white_background, depths, eval=False, lang_path=None, llff_hold=8, extension=".JPG", ):
 
     depths_folder=os.path.join(path, depths) if depths != "" else ""
     print("Reading Training Transforms")
     all_cam_infos = readCamerasFromTransforms_nerfstudio(path, lang_path, depths_folder, white_background, False, extension)
-    # print("Reading Test Transforms")
-    # test_cam_infos = readCamerasFromTransforms_nerfstudio(path, lang_path, depths_folder, white_background, True, extension)
     
     if not eval:
         train_cam_infos = all_cam_infos
@@ -491,9 +489,211 @@ def readScanNetppInfo(path, white_background, depths, eval, lang_path, llff_hold
                            )
     return scene_info
 
+def readScanNetCamerasFromTransforms(path, transformsfile, depths_folder, white_background, is_test, extension=".png"):
+    
+    # read camera poses
+    camera_pose_path = os.path.join(path, "pose", "camera_poses.npy")
+    camera_poses = np.load(camera_pose_path)
+    
+    cam_infos = []
+
+    with open(transformsfile) as json_file:
+        contents = json.load(json_file)
+        
+        # Get resize and crop parameters
+        # focal_len_x = contents["fx"]
+        focal_len_y = contents["fy"]
+        resize = (640, 478) # (640, 478)
+        frames = contents["frames"]
+        # cx = resize[0] / 2
+        # cy = resize[1] / 2
+        fovx = contents['camera_angle_x']
+        # fovy = contents['camera_angle_y']
+       
+        for idx, frame in enumerate(frames):
+
+            cam_name = frame["file_path"]
+            
+            # Load image
+            full_image_path = os.path.join(path, f"{cam_name}.jpg")
+            image_name = Path(cam_name).stem
+            
+            image = Image.open(full_image_path)
+            # original_size = image.size # (1296, 968)
+            
+            # First resize to the intermediate size
+            image = image.resize((resize[0], resize[1]), Image.LANCZOS)  # (640, 478)
+            final_size = image.size  # Should be (640, 480)
+            
+            index = int(os.path.basename(cam_name))
+            c2w = camera_poses[index]
+            w2c = np.linalg.inv(c2w)
+
+            R = w2c[:3, :3].transpose()
+            T = w2c[:3, 3]
+            
+            original_resize_y = 480
+            resize_ratio_y = resize[1] / original_resize_y
+            fy = focal_len_y * resize_ratio_y
+            fovy = focal2fov(fy, resize[1])
+
+            cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=fovy, FovX=fovx,
+                            image=image, image_path=full_image_path, image_name=image_name,
+                            width=final_size[0], height=final_size[1]))
+            
+    return cam_infos
+
+def readScanNetInfo(path, white_background, depths=None, eval=False, lang_path=None, llff_hold=8, extension=".JPG", ):
+
+    depths_folder=os.path.join(path, depths) if depths != None else ""
+    print("Reading Training Transforms")
+    all_cam_infos = readScanNetCamerasFromTransforms(path, lang_path, depths_folder, white_background, False, extension)
+    
+    if not eval:
+        train_cam_infos = all_cam_infos
+        test_cam_infos = []
+    else:
+        train_cam_infos = [c for idx, c in enumerate(all_cam_infos) if idx % llff_hold != 0]
+        test_cam_infos = [c for idx, c in enumerate(all_cam_infos) if idx % llff_hold == 0]
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    ply_path = os.path.join(path, "points3d.ply")
+    if not os.path.exists(ply_path):
+        # Since this data set has no colmap data, we start with random points
+        num_pts = 100_000
+        print(f"Generating random point cloud ({num_pts})...")
+        
+        # We create random points inside the bounds of the synthetic Blender scenes
+        xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
+        shs = np.random.random((num_pts, 3)) / 255.0
+        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
+
+        storePly(ply_path, xyz, SH2RGB(shs) * 255)
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        pcd = None
+
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path,
+                           )
+    return scene_info
+
+def readCamerasFromTransforms_opencv(path, transformsfile, depths_folder, white_background, is_test, extension=".png"):
+    cam_infos = []
+
+    with open(transformsfile) as json_file:
+        contents = json.load(json_file)
+        focal_len_x = contents["fl_x"] if "fl_x" in contents else contents["fx"]
+        focal_len_y = contents["fl_y"] if "fl_y" in contents else contents["fy"]
+        share_intrinsics = contents["share_intrinsics"] if "share_intrinsics" in contents else True
+
+        cx = contents["cx"] 
+        cy = contents["cy"]
+        if "crop_edge" in contents:
+            cx -= contents["crop_edge"]
+            cy -= contents["crop_edge"]
+        if "w" in contents and "h" in contents:
+            # scannetpp case, fx, fy, cx, cy in scannetpp json are for 1752*1168, not our target size
+            width, height = contents["w"], contents["h"]
+        elif "width" in contents and "height" in contents:
+            width, height = contents["width"], contents["height"]
+        elif "resize" in contents:
+            # scannet case, fx, fy, cx, cy in scannet json are already for image size 640x480
+            width, height = contents["resize"]
+            if "crop_edge" in contents:
+                width -= 2*contents["crop_edge"]
+                height -= 2*contents["crop_edge"]
+        else:
+            width, height = cx * 2, cy * 2
+            print("No width and height specified, using twice the cx and cy as default")
+        if share_intrinsics: 
+            fovx = focal2fov(focal_len_x, width)
+            fovy = focal2fov(focal_len_y, height)
+            FovY, FovX = fovy, fovx
+
+    
+        frames = contents["frames"]
+        # sort frames by frame["file_path"]
+        frames = sorted(frames, key=lambda x: x["file_path"])
+        # take frames by some interval
+        # frames = frames[::2]
+        for idx, frame in enumerate(frames):
+            if not share_intrinsics:
+                # do not consider "crop_edge" and "resize" in this case, implement if the dataset needs it
+                focal_len_x = frame["fx"]
+                focal_len_y = frame["fy"]
+                cx = frame["cx"]
+                cy = frame["cy"]
+                fovx = focal2fov(focal_len_x, width)
+                fovy = focal2fov(focal_len_y, height)
+                FovY, FovX = fovy, fovx
+
+            # image_path = path.replace("nerfstudio", "undistorted_images") if "nerfstudio" in path else path # not used for feature extraction
+            cam_name = frame["file_path"]
+
+            # NeRF 'transform_matrix' is a camera-to-world transform
+            c2w = np.array(frame["transform_matrix"])
+            # get the world-to-camera transform and set R, T
+            # w2c = c2w
+            # some dataset save world-to-camera, some camera-to-world, careful!
+            w2c = np.linalg.inv(c2w)
+            # w2c[1:3] *= -1
+            R = np.transpose(w2c[:3,:3])  # R is stored transposed due to 'glm' in CUDA code
+            T = w2c[:3, 3]
+            image_path = os.path.join(path, f'{cam_name}')
+            image_name = Path(cam_name).stem
+            
+            image = Image.open(image_path)
+
+
+            # depth_path = os.path.join(depths_folder, f"{image_name}.png") if depths_folder != "" else ""
+
+            cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX,
+                            image=image, image_path=image_path, image_name=image_name,
+                            width=width, height=height))
+            
+            
+    return cam_infos
+
+def readMatterPort3DInfo(path, white_background, depths=None, eval=None, lang_path=None, llff_hold=8, extension=".jpg"):
+
+    depths_folder=os.path.join(path, depths) if depths is not None else ""
+    all_cam_infos = readCamerasFromTransforms_opencv(path, lang_path, depths_folder, white_background, False, extension)
+    if not eval:
+        train_cam_infos = all_cam_infos
+        test_cam_infos = []
+    else:
+        train_cam_infos = [c for idx, c in enumerate(all_cam_infos) if idx % llff_hold != 0]
+        test_cam_infos = [c for idx, c in enumerate(all_cam_infos) if idx % llff_hold == 0]
+    # print("Reading Training Transforms")
+    # all_cam_infos = readCamerasFromTransforms_opencv(path, lang_path, depths_folder, white_background, False, extension)
+    # print("Reading Test Transforms")
+    # test_cam_infos = readCamerasFromTransforms_opencv(path, lang_path, depths_folder, white_background, True, extension)
+    
+    # if not eval:
+    #     train_cam_infos.extend(test_cam_infos)
+    #     test_cam_infos = []
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    scene_info = SceneInfo(point_cloud=None,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=None)
+    return scene_info
+
+
+
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
     "Blender": readNerfSyntheticInfo,
-    "ScanNet": readScanNetSceneInfo,
-    "ScanNetpp": readScanNetppInfo
+    "ScanNet": readScanNetInfo,
+    "ScanNetpp": readScanNetppInfo,
+    "MatterPort3D": readMatterPort3DInfo
 }

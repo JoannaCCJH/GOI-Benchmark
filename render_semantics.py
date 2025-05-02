@@ -71,12 +71,16 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
 
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool):
     
-    language_feature_dir=f"{dataset.source_path}/dslr/language_features"
-    # language_feature_dir=f"{dataset.source_path}/language_features"
+    # Get the language feature dir
+    dataset_type = os.path.basename(os.path.dirname(dataset.source_path)).split('_')[0]
+    if dataset_type == "scannetpp":
+        language_feature_dir=f"{dataset.source_path}/dslr/language_features"
+    elif dataset_type == "scannet":
+        language_feature_dir = os.path.join(dataset.source_path, "language_features")
     
     with torch.no_grad():
         gaussians = GaussianModel(dataset.sh_degree, dataset.sem_dim)
-        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, is_render_sem=True)
+        scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False, is_render_sem=True, dataset_type=dataset_type)
         
         psem = os.path.join(dataset.model_path, "point_cloud","iteration_" + str(iteration) + "_lvl_" + str(dataset.feature_level), "semantic_MLP.pt")      
         plut = os.path.join(dataset.model_path, "point_cloud","iteration_" + str(iteration) + "_lvl_" + str(dataset.feature_level), "LUT.pt")      

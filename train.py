@@ -24,6 +24,7 @@ from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+import torchvision
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -41,13 +42,33 @@ def kmeans(x, ncluster, niter=10):
     '''
     N, D = x.size()
     x /= x.norm(dim=1, keepdim=True)  # normalize each data point
-    centers = x[torch.randperm(N)[:ncluster]]  # init clusters at random
+    # centers = x[torch.randperm(N)[:ncluster]]  # init clusters at random
+    
+    if N < ncluster:
+        print(f"Warning: Requested {ncluster} clusters but only have {N} data points.")
+        indices = torch.randint(0, N, (ncluster,))  # Sample with replacement
+        centers = x[indices]
+    else:
+        centers = x[torch.randperm(N)[:ncluster]]  # init clusters at random
+        
+    # print("shape of centers: ", centers.shape)
+
     for _ in range(niter):
         centers /= centers.norm(dim=1, keepdim=True)
         distances = x @ centers.T
         assignments = distances.argmax(1)
         # move each codebook element to be the mean of the pixels that assigned to it
-        centers = torch.stack([x[assignments == k].mean(0) for k in range(ncluster)])
+        # centers = torch.stack([x[assignments == k].mean(0) for k in range(ncluster)])
+        new_centers = torch.zeros_like(centers)
+        for k in range(ncluster):
+            cluster_points = x[assignments == k]
+            if len(cluster_points) > 0:
+                new_centers[k] = cluster_points.mean(0)
+            else:
+                # Keep old center or assign a new random point
+                new_centers[k] = centers[k]  # Avoid NaN by keeping old center
+        
+        centers = new_centers
         # re-assign any poorly positioned codebook elements
         nanix = torch.any(torch.isnan(centers), dim=1)
         ndead = nanix.sum().item()
@@ -56,10 +77,19 @@ def kmeans(x, ncluster, niter=10):
     return centers
 
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, dataset_type):
     
-    language_feature_dir=f"{dataset.source_path}/dslr/language_features"
-    # language_feature_dir=f"{dataset.source_path}/language_features"
+    # Get the language feature dir
+    if dataset_type is None:
+        dataset_type = os.path.basename(os.path.dirname(dataset.source_path)).split('_')[0]
+    print(dataset_type)
+    if dataset_type == "scannetpp":
+        language_feature_dir=f"{dataset.source_path}/dslr/language_features"
+    elif dataset_type == "scannet":
+        language_feature_dir = os.path.join(dataset.source_path, "language_features")
+    elif dataset_type == "matterport3d":
+        src_path = dataset.source_path
+        language_feature_dir = src_path.replace("original_data", "language_features_clip")
     
     # torch.autograd.set_detect_anomaly = True
     first_iter = 0
@@ -67,10 +97,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians = GaussianModel(dataset.sh_degree, dataset.sem_dim)
     semantic_MLP = SemanticModel(dim_in=dataset.sem_dim, dim_out=dataset.tab_len, num_layer=1, use_bias=True)
     sem_opt = torch.optim.Adam(semantic_MLP.parameters(), lr=0.003)
-    lut = torch.nn.Parameter(torch.rand((dataset.tab_len, dataset.ape_dim), device="cuda", requires_grad=True) * 0.03) #look up table
+    lut = torch.nn.Parameter(torch.rand((dataset.tab_len, dataset.clip_dim), device="cuda", requires_grad=True) * 0.03) #look up table
     lut_opt = torch.optim.Adam([lut], lr=0.001)
 
-    scene = Scene(dataset, gaussians, 1)
+    scene = Scene(dataset, gaussians, 1, dataset_type=dataset_type)
     gaussians.finetune_sh_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
@@ -140,21 +170,25 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         render_pkg = render(viewpoint_cam, gaussians, pipe, bg)
         image, sem_feature, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg[
             "semantics"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+        
+        # torchvision.utils.save_image(image, os.path.join("/home/joanna_cheng/workspace/GOI-Hyperplane/render_image",  viewpoint_cam.image_name + ".png"))
 
         # Loss
         # gt_image = viewpoint_cam.original_image.cuda()
         # Ll1 = l1_loss(image, gt_image)
         # ssim_loss = ssim(image, gt_image)
+        # psnr_loss = psnr(torch.clamp(image, 0.0, 1.0), torch.clamp(gt_image, 0.0, 1.0)).mean().double()
+        # print("psnr_loss: ", psnr_loss)
         # loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_loss)
 
-        sem_feature = sem_feature.permute(1, 2, 0).reshape(-1, dataset.sem_dim)
-        sem_label = semantic_MLP(sem_feature)
-        sem_label = softmax(sem_label, dim=-1)  ###
+        sem_feature = sem_feature.permute(1, 2, 0).reshape(-1, dataset.sem_dim) # (h*w, 10)
+        sem_label = semantic_MLP(sem_feature) # (h*2, tab_len)
+        sem_label = softmax(sem_label, dim=-1)  # (h*2, tab_len)
         # gtl = viewpoint_cam.semantic['ape'].to("cuda").float()
         gtl, mask = viewpoint_cam.get_language_feature(language_feature_dir, dataset.feature_level)
 
         # gtl = gtl.permute(1, 2, 0).reshape(-1, dataset.ape_dim)
-        gtl = gtl.permute(1, 2, 0).reshape(-1, dataset.clip_dim)
+        gtl = gtl.permute(1, 2, 0).reshape(-1, dataset.clip_dim) # (h*w, 512)
         mask_flat = mask.reshape(-1) if mask is not None else torch.ones(gtl.shape[0], device=gtl.device)
         
         # Only process features where mask is True
@@ -168,7 +202,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # Normalize features
         gtl_valid /= gtl_valid.norm(dim=1, keepdim=True)
         lut1 = lut / lut.norm(dim=1, keepdim=True)
-        sim = gtl_valid @ lut1.T
+        # sim = gtl_valid @ lut1.T
+        sim = gtl_valid.float() @ lut1.float().T
 
         sim_val = sim.max(dim=1, keepdim=True)[0]
         label = (sim == sim_val).float().detach()
@@ -313,6 +348,7 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default=None)
+    parser.add_argument("--dataset_type", type=str, default=None)
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
@@ -325,7 +361,7 @@ if __name__ == "__main__":
     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations,
-             args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+             args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.dataset_type)
 
     # All done
     print("\nTraining complete.")

@@ -25,7 +25,7 @@ def load_scene_list(gt_scene_dir):
     return folder_names
     
 def load_ply(path):
-        semantic_dim=512
+        semantic_dim=10
         
         plydata = PlyData.read(path)
 

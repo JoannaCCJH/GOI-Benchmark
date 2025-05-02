@@ -50,8 +50,8 @@ class Camera(nn.Module):
         
     def get_language_feature(self, language_feature_dir, feature_level):
         language_feature_name = os.path.join(language_feature_dir, self.image_name)
-        seg_map = torch.from_numpy(np.load(language_feature_name + '_s.npy'))
-        feature_map = torch.from_numpy(np.load(language_feature_name + '_f.npy'))
+        seg_map = torch.from_numpy(np.load(language_feature_name + '_s.npy')) # torch.Size([4, 478, 640])
+        feature_map = torch.from_numpy(np.load(language_feature_name + '_f.npy')) # torch.Size([69, 512]) 
         
         y, x = torch.meshgrid(torch.arange(0, self.image_height), torch.arange(0, self.image_width))
         x = x.reshape(-1, 1)
@@ -59,7 +59,7 @@ class Camera(nn.Module):
         seg = seg_map[:, y, x].squeeze(-1).long()
         mask = seg != -1
         
-        if feature_level == 0: # default
+        if feature_level == 0: # default -> scannet
             point_feature1 = feature_map[seg[0:1]].squeeze(0)
             mask = mask[0:1].reshape(1, self.image_height, self.image_width)
         elif feature_level == 1: # s
@@ -75,14 +75,16 @@ class Camera(nn.Module):
             raise ValueError("feature_level=", feature_level)
         point_feature = point_feature1.reshape(self.image_height, self.image_width, -1).permute(2, 0, 1)
        
-        return point_feature.cuda(), mask.cuda()
+        return point_feature.cuda(), mask.cuda() # (clip_dim, 456, 616) (1, 456, 616)
     
     def get_unique_language_features(self, language_feature_dir, feature_level):
         language_feature_name = os.path.join(language_feature_dir, self.image_name)
         feature_map = torch.from_numpy(np.load(language_feature_name + '_f.npy'))
         seg_map = torch.from_numpy(np.load(language_feature_name + '_s.npy'))
         
-        level_seg_map = seg_map[feature_level]
+        # print(feature_map.shape, seg_map.shape) # torch.Size([11, 512]) torch.Size([1, 512, 640])
+        
+        level_seg_map = seg_map[feature_level] 
         
         # Get unique segmentation indices, excluding -1
         unique_indices = torch.unique(level_seg_map)

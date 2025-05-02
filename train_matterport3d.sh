@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Directory containing all scenes
-BASE_DIR="/scratch/joanna_cheng/scannet_3dgs"
-DATA_DIR="/scratch/joanna_cheng/scannet_language_feature"
+BASE_DIR="/scratch/joanna_cheng/matterport3d_region_mini_test_set_suite/mcmc_3dgs"
+DATA_DIR="/scratch/joanna_cheng/matterport3d_region_mini_test_set_suite/original_data"
 
 # Check if the base directory exists
 if [ ! -d "$BASE_DIR" ]; then
@@ -43,7 +43,7 @@ for SCENE_DIR in "$BASE_DIR"/*/; do
     
     # Train semantics
     echo "Training scene: $SCENE"
-    python train.py --iteration 1500 -m "$BASE_DIR/$SCENE" -s "$DATA_DIR/$SCENE" --feature_level 3 --eval
+    python train.py --iteration 1500 -m "$BASE_DIR/$SCENE" -s "$DATA_DIR/$SCENE" --dataset_type matterport3d --feature_level 0 --eval
     
     echo "Completed processing scene: $SCENE"
     echo "----------------------------------------"
